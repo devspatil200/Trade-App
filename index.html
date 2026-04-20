@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="mr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Trading Saathi – Live Crypto विश्लेषक</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080c14; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; -webkit-tap-highlight-color: transparent; }
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const COINS   = ["BTC","ETH","SOL","BNB","XRP"];
+const BINANCE = { BTC:"BTCUSDT", ETH:"ETHUSDT", SOL:"SOLUSDT", BNB:"BNBUSDT", XRP:"XRPUSDT" };
+const USD_INR = 83.5;
+
+/* ── formatters ── */
+function fP(p) {
+  if (!p && p !== 0) return "$--";
+  if (p >= 1000) return "$" + Math.round(p).toLocaleString("en-US");
+  if (p >= 1)    return "$" + Number(p).toFixed(2);
+  return "$" + Number(p).toFixed(4);
+}
+function fINR(usd) {
+  const n = usd * USD_INR;
+  if (n >= 10000000) return "₹" + (n/10000000).toFixed(2) + " Cr";
+  if (n >= 100000)   return "₹" + (n/100000).toFixed(2) + " L";
+  return "₹" + Math.round(n).toLocaleString("en-IN");
+}
+function fRs(amt) { return "₹" + Math.abs(Math.round(amt)).toLocaleString("en-IN"); }
+
+/* ── calculations ── */
+function calcRSI(chg) {
+  return Math.min(83, Math.max(17, Math.round(50 + chg * 3.5)));
+}
+function calcLevels(price, chg, tradeType) {
+  const vol = Math.max(Math.abs(chg) / 100, 0.008);
+  const m   = tradeType === "intraday" ? 0.7 : tradeType === "positional" ? 1.8 : 1.2;
+  const v   = vol * m;
+  return {
+    s2: price * (1 - v * 3.2),
+    s1: price * (1 - v * 1.6),
+    r1: price * (1 + v * 1.6),
+    r2: price * (1 + v * 3.2),
+  };
+}
+function getSignal(rsi, chg, price, ema20) {
+  if (rsi < 30)                          return { signal:"BUY",  confidence:"HIGH",   trend:"BULLISH" };
+  if (rsi > 70)                          return { signal:"SELL", confidence:"HIGH",   trend:"BEARISH" };
+  if (chg > 2  && price > ema20)         return { signal:"BUY",  confidence:"MEDIUM", trend:"BULLISH" };
+  if (chg < -2 && price < ema20)         return { signal:"SELL", confidence:"MEDIUM", trend:"BEARISH" };
+  if (chg > 0.5)                         return { signal:"BUY",  confidence:"LOW",    trend:"SIDEWAYS" };
+  if (chg < -0.5)                        return { signal:"HOLD", confidence:"LOW",    trend:"SIDEWAYS" };
+  return                                        { signal:"HOLD", confidence:"LOW",    trend:"SIDEWAYS" };
+}
+function fallback(signal, coin, rsi, sl, t1) {
+  if (signal === "BUY")
+    return `${coin} खरेदीसाठी चांगली संधी आहे. RSI ${rsi} Oversold zone मध्ये आहे. Stop Loss ${sl} वर ठेवा आणि Target ${t1} आहे. Risk manage करून entry घ्या.`;
+  if (signal === "SELL")
+    return `${coin} Overbought zone मध्ये आहे (RSI ${rsi}). Correction येण्याची शक्यता आहे. Stop Loss ${sl} वर ठेवा. सावधगिरीने trade करा.`;
+  return `${coin} सध्या Sideways आहे. RSI ${rsi} Normal zone मध्ये आहे. Strong signal येईपर्यंत wait करा. नवीन position घेणे टाळा.`;
+}
+
+/* ── Settings Modal ── */
+function SettingsModal({ onClose }) {
+  const [key, setKey]   = useState(localStorage.getItem("groq_key") || "");
+  const [saved, setSaved] = useState(false);
+
+  function save() {
+    localStorage.setItem("groq_key", key.trim());
+    setSaved(true);
+    setTimeout(() => { setSaved(false); onClose(); }, 900);
+  }
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.88)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+      <div style={{ background:"#111827", border:"1px solid #1c2d42", borderRadius:20, padding:24, width:"100%", maxWidth:380 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+          <div style={{ fontSize:16, fontWeight:800, color:"#00d4ff" }}>⚙️ Settings</div>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:"#6b8aaa", fontSize:20, cursor:"pointer" }}>✕</button>
+        </div>
+
+        <div style={{ fontSize:11, color:"#6b8aaa", fontFamily:"monospace", marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Groq API Key</div>
+        <input
+          type="password"
+          value={key}
+          onChange={e => setKey(e.target.value)}
+          placeholder="gsk_..."
+          style={{ width:"100%", background:"#162032", border:"1px solid #1c2d42", borderRadius:10, padding:"12px 14px", color:"#e2e8f0", fontFamily:"monospace", fontSize:13, outline:"none", marginBottom:10 }}
+        />
+        <div style={{ fontSize:10, color:"#4a6080", marginBottom:16, lineHeight:1.7 }}>
+          🔐 Key फक्त तुमच्या phone मध्येच save होते. GitHub वर दिसत नाही.<br/>
+          Key मिळवा: <span style={{ color:"#00d4ff" }}>console.groq.com</span> → Free account → API Keys
+        </div>
+        <button onClick={save} style={{ width:"100%", background: saved ? "#00e676" : "linear-gradient(135deg,#00d4ff,#0099cc)", border:"none", borderRadius:10, padding:14, color:"#000", fontSize:14, fontWeight:800, cursor:"pointer" }}>
+          {saved ? "✅ Saved!" : "💾 Save करा"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Main App ── */
+function App() {
+  const [coin,         setCoin]         = useState("BTC");
+  const [tradeType,    setTradeType]    = useState("swing");
+  const [capital,      setCapital]      = useState(50000);
+  const [prices,       setPrices]       = useState({});
+  const [result,       setResult]       = useState(null);
+  const [loading,      setLoading]      = useState(false);
+  const [aiLoading,    setAiLoading]    = useState(false);
+  const [error,        setError]        = useState("");
+  const [aiAnalysis,   setAiAnalysis]   = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [hasKey,       setHasKey]       = useState(!!localStorage.getItem("groq_key"));
+
+  /* price fetch — Binance primary, CoinCap fallback */
+  const loadPrice = useCallback(async (c) => {
+    try {
+      const r = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=" + BINANCE[c]);
+      if (!r.ok) throw new Error();
+      const d = await r.json();
+      const pr = { p: parseFloat(d.lastPrice), c: parseFloat(d.priceChangePercent) };
+      setPrices(prev => ({ ...prev, [c]: pr }));
+      return pr;
+    } catch {}
+    try {
+      const r2 = await fetch("https://api.coincap.io/v2/assets/" + c.toLowerCase());
+      if (!r2.ok) throw new Error();
+      const d2 = await r2.json();
+      if (d2?.data?.priceUsd) {
+        const pr = { p: parseFloat(d2.data.priceUsd), c: parseFloat(d2.data.changePercent24Hr || 0) };
+        setPrices(prev => ({ ...prev, [c]: pr }));
+        return pr;
+      }
+    } catch {}
+    return null;
+  }, []);
+
+  useEffect(() => {
+    COINS.forEach(c => loadPrice(c));
+    const t = setInterval(() => COINS.forEach(c => loadPrice(c)), 60000);
+    return () => clearInterval(t);
+  }, [loadPrice]);
+
+  /* main analyse */
+  async function analyse() {
+    const groqKey = localStorage.getItem("groq_key");
+    if (!groqKey) { setShowSettings(true); return; }
+
+    setLoading(true); setError(""); setResult(null); setAiAnalysis("");
+
+    try {
+      const pr = await loadPrice(coin);
+      if (!pr) throw new Error(coin + " price मिळाला नाही. Internet तपासा आणि पुन्हा try करा.");
+
+      const price = pr.p, chg = pr.c;
+      const rsi   = calcRSI(chg);
+      const ema20 = price * (1 - chg * 0.003);
+      const macd  = chg * price * 0.0001;
+      const lv    = calcLevels(price, chg, tradeType);
+      const { signal, confidence, trend } = getSignal(rsi, chg, price, ema20);
+
+      const ep   = price;
+      const sl   = signal === "SELL" ? lv.r1 : lv.s1;
+      const t1   = signal === "SELL" ? lv.s1 : lv.r1;
+      const t2   = signal === "SELL" ? lv.s2 : lv.r2;
+
+      const slPct    = ((Math.abs(ep - sl) / ep) * 100).toFixed(2);
+      const t1Pct    = ((Math.abs(t1 - ep) / ep) * 100).toFixed(2);
+      const t2Pct    = ((Math.abs(t2 - ep) / ep) * 100).toFixed(2);
+      const rr       = Math.abs(ep - sl) > 0 ? (Math.abs(t1 - ep) / Math.abs(ep - sl)).toFixed(1) : "N/A";
+      const qty      = (capital / (ep * USD_INR)).toFixed(6);
+      const riskAmt  = (capital * parseFloat(slPct)) / 100;
+      const profitAmt= (capital * parseFloat(t1Pct)) / 100;
+
+      setResult({ price, chg, rsi, ema20, macd, lv, signal, confidence, trend, ep, sl, t1, t2, slPct, t1Pct, t2Pct, rr, qty, riskAmt, profitAmt });
+      setLoading(false);
+
+      /* Groq AI */
+      setAiLoading(true);
+      const tLbl = tradeType === "swing" ? "Swing Trade (2-5 दिवस)" : tradeType === "intraday" ? "Intraday (आजच)" : "Positional (1-4 आठवडे)";
+      const prompt =
+`तुम्ही expert crypto trading analyst आहात. खालील data वापरून ${coin} साठी ${tLbl} विश्लेषण फक्त मराठीत लिहा. 3-4 वाक्यांमध्ये: signal का आहे, risk काय आहे, trader ने काय करावे.
+
+Coin: ${coin} | Price: ${fP(price)} (${fINR(price)})
+24h Change: ${chg.toFixed(2)}% | RSI: ${rsi} | Signal: ${signal} (${confidence})
+Entry: ${fP(ep)} | Stop Loss: ${fP(sl)} (-${slPct}%) | Target 1: ${fP(t1)} (+${t1Pct}%)
+EMA20: price ${price > ema20 ? "वर आहे (Bullish)" : "खाली आहे (Bearish)"} | R:R = 1:${rr}
+
+फक्त मराठीत उत्तर द्या:`;
+
+      try {
+        const res  = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type":"application/json", "Authorization":"Bearer " + groqKey },
+          body: JSON.stringify({ model:"llama-3.3-70b-versatile", max_tokens:300, messages:[{ role:"user", content:prompt }] })
+        });
+        const data = await res.json();
+        const txt  = data?.choices?.[0]?.message?.content || "";
+        setAiAnalysis(txt || fallback(signal, coin, rsi, fP(sl), fP(t1)));
+      } catch {
+        setAiAnalysis(fallback(signal, coin, rsi, fP(sl), fP(t1)));
+      }
+      setAiLoading(false);
+
+    } catch(e) {
+      setError(e.message || "Error आला. पुन्हा try करा.");
+      setLoading(false);
+    }
+  }
+
+  /* derived display values */
+  const sigColor = result?.signal === "BUY" ? "#00e676" : result?.signal === "SELL" ? "#ff3d57" : "#ffca28";
+  const sigEmoji = result?.signal === "BUY" ? "🟢"      : result?.signal === "SELL" ? "🔴"      : "🟡";
+  const sigText  = result?.signal === "BUY" ? "खरेदी करा" : result?.signal === "SELL" ? "विक्री करा" : "थांबा";
+  const rsiColor = result ? (result.rsi < 30 ? "#00e676" : result.rsi > 70 ? "#ff3d57" : "#ffca28") : "#ffca28";
+
+  return (
+    <div style={{ background:"#080c14", minHeight:"100vh", color:"#e2e8f0", fontFamily:"system-ui,sans-serif", maxWidth:480, margin:"0 auto" }}>
+
+      {showSettings && (
+        <SettingsModal onClose={() => { setShowSettings(false); setHasKey(!!localStorage.getItem("groq_key")); }} />
+      )}
+
+      {/* ── Header ── */}
+      <div style={{ padding:"14px 16px", background:"rgba(8,12,20,.97)", borderBottom:"1px solid #1c2d42", display:"flex", alignItems:"center", justifyContent:"space-between", position:"sticky", top:0, zIndex:50 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <div style={{ width:38, height:38, background:"linear-gradient(135deg,#00d4ff,#ff6b00)", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>📈</div>
+          <div>
+            <div style={{ fontSize:17, fontWeight:800, background:"linear-gradient(90deg,#00d4ff,#ff6b00)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>Trading Saathi</div>
+            <div style={{ fontSize:9, color:"#6b8aaa", fontFamily:"monospace" }}>Live Crypto विश्लेषक</div>
+          </div>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <button onClick={() => setShowSettings(true)} title="Settings"
+            style={{ background:"none", border:"1px solid #1c2d42", borderRadius:8, padding:"5px 10px", color: hasKey ? "#00e676" : "#ffca28", fontSize:16, cursor:"pointer" }}>
+            {hasKey ? "⚙️" : "🔑"}
+          </button>
+          <div style={{ fontSize:10, color:"#00e676", fontFamily:"monospace", border:"1px solid rgba(0,230,118,.4)", borderRadius:20, padding:"3px 8px" }}>● LIVE</div>
+        </div>
+      </div>
+
+      {/* ── Ticker ── */}
+      <div style={{ background:"#111827", borderBottom:"1px solid #1c2d42", padding:"7px 14px", overflowX:"auto", whiteSpace:"nowrap" }}>
+        <div style={{ display:"inline-flex", gap:20 }}>
+          {COINS.map(c => (
+            <span key={c} style={{ display:"inline-flex", alignItems:"center", gap:5, fontFamily:"monospace", fontSize:10 }}>
+              <span style={{ color:"#6b8aaa" }}>{c}</span>
+              <span style={{ color:"#e2e8f0", fontWeight:700 }}>{prices[c] ? fP(prices[c].p) : "--"}</span>
+              {prices[c] && (
+                <span style={{ color: prices[c].c >= 0 ? "#00e676" : "#ff3d57" }}>
+                  {prices[c].c >= 0 ? "+" : ""}{prices[c].c.toFixed(2)}%
+                </span>
+              )}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* ── No-key banner ── */}
+      {!hasKey && (
+        <div onClick={() => setShowSettings(true)}
+          style={{ margin:"12px 14px 0", background:"rgba(255,202,40,.08)", border:"1px solid rgba(255,202,40,.3)", borderRadius:12, padding:"10px 14px", cursor:"pointer", display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontSize:18 }}>🔑</span>
+          <div>
+            <div style={{ fontSize:12, color:"#ffca28", fontWeight:700 }}>Groq API Key लागेल</div>
+            <div style={{ fontSize:10, color:"#6b8aaa" }}>AI विश्लेषणासाठी येथे tap करा → Settings उघडेल</div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding:"16px 14px 0" }}>
+
+        {/* ── Coin ── */}
+        <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", textTransform:"uppercase", letterSpacing:2, marginBottom:8 }}>Coin निवडा</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:12 }}>
+          {COINS.map(c => (
+            <div key={c} onClick={() => setCoin(c)}
+              style={{ background: coin===c ? "rgba(0,212,255,.1)" : "#111827", border:"1px solid "+(coin===c ? "#00d4ff" : "#1c2d42"), borderRadius:11, padding:"8px 3px", textAlign:"center", cursor:"pointer" }}>
+              <div style={{ fontSize:11, fontWeight:800, color: coin===c ? "#00d4ff" : "#6b8aaa" }}>{c}</div>
+              <div style={{ fontSize:9, fontFamily:"monospace", marginTop:2, color: coin===c ? "#00d4ff" : "#4a6080" }}>
+                {prices[c] ? fP(prices[c].p) : "लोड..."}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── Capital ── */}
+        <div style={{ background:"#111827", border:"1px solid #1c2d42", borderRadius:13, padding:14, marginBottom:12 }}>
+          <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", textTransform:"uppercase", letterSpacing:2, marginBottom:10 }}>Capital (INR)</div>
+          <input type="number" value={capital} onChange={e => setCapital(parseFloat(e.target.value) || 50000)}
+            style={{ width:"100%", background:"#162032", border:"1px solid #1c2d42", borderRadius:9, padding:"10px 12px", color:"#ff6b00", fontFamily:"monospace", fontSize:16, fontWeight:700, outline:"none" }} />
+        </div>
+
+        {/* ── Trade Type ── */}
+        <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", textTransform:"uppercase", letterSpacing:2, marginBottom:8 }}>Trade Type</div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:6, marginBottom:14 }}>
+          {[["swing","🔄","SWING","2-5 दिवस"],["intraday","⚡","INTRADAY","आजच"],["positional","📅","HOLD","1-4 आठवडे"]].map(([t,ico,nm,sub]) => (
+            <div key={t} onClick={() => setTradeType(t)}
+              style={{ background: tradeType===t ? "rgba(255,107,0,.08)" : "#111827", border:"1px solid "+(tradeType===t ? "#ff6b00" : "#1c2d42"), borderRadius:10, padding:"8px 3px", textAlign:"center", cursor:"pointer" }}>
+              <div style={{ fontSize:15, marginBottom:2 }}>{ico}</div>
+              <div style={{ fontSize:10, fontWeight:700, color: tradeType===t ? "#ff6b00" : "#6b8aaa" }}>{nm}</div>
+              <div style={{ fontSize:9, color:"#4a6080", marginTop:1 }}>{sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── Analyse Button ── */}
+        <button onClick={analyse} disabled={loading}
+          style={{ width:"100%", background: loading ? "#1c2d42" : "linear-gradient(135deg,#00d4ff,#0099cc)", border:"none", borderRadius:13, padding:16, color: loading ? "#4a6080" : "#000", fontSize:16, fontWeight:800, cursor: loading ? "not-allowed" : "pointer", marginBottom:18 }}>
+          {loading ? "⏳ Live data आणत आहे..." : "🔍 Live विश्लेषण सुरू करा"}
+        </button>
+      </div>
+
+      {/* ── Error ── */}
+      {error && (
+        <div style={{ margin:"0 14px 14px", background:"rgba(255,61,87,.08)", border:"1px solid rgba(255,61,87,.3)", borderRadius:13, padding:14, textAlign:"center", color:"#ff3d57", fontFamily:"monospace", fontSize:11, lineHeight:1.6 }}>
+          ⚠️ {error}
+        </div>
+      )}
+
+      {/* ── Results ── */}
+      {result && (
+        <div style={{ padding:"0 14px" }}>
+
+          {/* Price Card */}
+          <div style={{ background:"linear-gradient(135deg,#111827,#162032)", border:"1px solid #1c2d42", borderRadius:18, padding:18, marginBottom:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div>
+                <div style={{ fontSize:24, fontWeight:800 }}>{coin}</div>
+                <div style={{ fontSize:10, color:"#6b8aaa", fontFamily:"monospace" }}>{tradeType.toUpperCase()} Trade</div>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:22, fontWeight:800, fontFamily:"monospace", color:"#00d4ff" }}>{fP(result.price)}</div>
+                <div style={{ fontSize:11, fontFamily:"monospace", color: result.chg >= 0 ? "#00e676" : "#ff3d57" }}>
+                  {result.chg >= 0 ? "+" : ""}{result.chg.toFixed(2)}% (24h)
+                </div>
+              </div>
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:7 }}>
+              {[
+                ["INR", fINR(result.price), "#00d4ff"],
+                ["RSI", result.rsi + (result.rsi < 30 ? " 🟢" : result.rsi > 70 ? " 🔴" : " 🟡"), rsiColor],
+                ["EMA20", result.price > result.ema20 ? "वर ↑" : "खाली ↓", result.price > result.ema20 ? "#00e676" : "#ff3d57"],
+              ].map(([l,v,c]) => (
+                <div key={l} style={{ background:"rgba(0,0,0,.2)", borderRadius:9, padding:8, textAlign:"center" }}>
+                  <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", marginBottom:3 }}>{l}</div>
+                  <div style={{ fontSize:11, fontWeight:700, fontFamily:"monospace", color:c }}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Signal Card */}
+          <div style={{ background: result.signal==="BUY" ? "rgba(0,230,118,.07)" : result.signal==="SELL" ? "rgba(255,61,87,.07)" : "rgba(255,202,40,.07)", border:"1px solid "+(result.signal==="BUY" ? "rgba(0,230,118,.3)" : result.signal==="SELL" ? "rgba(255,61,87,.3)" : "rgba(255,202,40,.3)"), borderRadius:18, padding:18, marginBottom:10, borderTop:"3px solid "+sigColor }}>
+            <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:12 }}>
+              <div style={{ fontSize:44 }}>{sigEmoji}</div>
+              <div>
+                <div style={{ fontSize:28, fontWeight:800, color:sigColor }}>{sigText}</div>
+                <div style={{ fontSize:11, color:"#6b8aaa", fontFamily:"monospace", marginTop:3 }}>{result.confidence} CONFIDENCE · {result.trend}</div>
+              </div>
+            </div>
+            <div style={{ background:"rgba(0,0,0,.3)", borderRadius:11, padding:12, fontSize:13, lineHeight:1.9, color:"#e2e8f0", minHeight:58 }}>
+              {aiLoading ? "⏳ AI विश्लेषण होत आहे..." : aiAnalysis}
+            </div>
+          </div>
+
+          {/* Trade Plan */}
+          <div style={{ background:"#111827", border:"1px solid #1c2d42", borderRadius:18, padding:16, marginBottom:10 }}>
+            <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", textTransform:"uppercase", letterSpacing:2, marginBottom:12 }}>📊 Trade Plan</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
+              {[
+                ["🎯 Entry Price",  fP(result.ep),  fINR(result.ep),                                           "#00d4ff"],
+                ["🛡 Stop Loss",    fP(result.sl),  "-"+result.slPct+"% · "+fRs(result.riskAmt)+" risk",       "#ff3d57"],
+                ["🎯 Target 1",     fP(result.t1),  "+"+result.t1Pct+"% · "+fRs(result.profitAmt)+" profit",   "#00e676"],
+                ["🚀 Target 2",     fP(result.t2),  "+"+result.t2Pct+"% · Extended",                           "#bb86fc"],
+              ].map(([l,v,s,c]) => (
+                <div key={l} style={{ background:"#162032", border:"1px solid #1c2d42", borderRadius:12, padding:13, textAlign:"center" }}>
+                  <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", marginBottom:6 }}>{l}</div>
+                  <div style={{ fontSize:15, fontWeight:800, fontFamily:"monospace", color:c }}>{v}</div>
+                  <div style={{ fontSize:9, color:"#4a6080", marginTop:3, fontFamily:"monospace" }}>{s}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ background:"linear-gradient(135deg,rgba(0,212,255,.07),rgba(255,107,0,.07))", border:"1px solid rgba(0,212,255,.2)", borderRadius:12, padding:"13px 16px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontSize:10, color:"#6b8aaa", fontFamily:"monospace" }}>Risk : Reward</div>
+                <div style={{ fontSize:11, color:"#4a6080", fontFamily:"monospace", marginTop:2 }}>Capital: ₹{capital.toLocaleString("en-IN")}</div>
+              </div>
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:18, fontWeight:800, color:"#ffca28", fontFamily:"monospace" }}>1 : {result.rr}</div>
+                <div style={{ fontSize:11, color:"#00d4ff", fontFamily:"monospace", marginTop:2 }}>{result.qty} coins घ्या</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Indicators */}
+          <div style={{ background:"#111827", border:"1px solid #1c2d42", borderRadius:18, padding:16, marginBottom:10 }}>
+            <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", textTransform:"uppercase", letterSpacing:2, marginBottom:12 }}>Live Indicators</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
+              <div style={{ background:"#162032", border:"1px solid #1c2d42", borderRadius:12, padding:"12px 7px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", marginBottom:8 }}>RSI (14)</div>
+                <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color:rsiColor, marginBottom:4 }}>{result.rsi}</div>
+                <div style={{ fontSize:9, color:rsiColor, fontFamily:"monospace" }}>{result.rsi < 30 ? "Oversold" : result.rsi > 70 ? "Overbought" : "Normal"}</div>
+                <div style={{ height:4, background:"#1c2d42", borderRadius:2, marginTop:7, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:result.rsi+"%", background:rsiColor, borderRadius:2 }} />
+                </div>
+              </div>
+              <div style={{ background:"#162032", border:"1px solid #1c2d42", borderRadius:12, padding:"12px 7px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", marginBottom:8 }}>MACD</div>
+                <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color: result.macd > 0 ? "#00e676" : "#ff3d57", marginBottom:4 }}>
+                  {result.macd > 0 ? "+" : ""}{result.macd.toFixed(2)}
+                </div>
+                <div style={{ fontSize:9, color: result.macd > 0 ? "#00e676" : "#ff3d57", fontFamily:"monospace" }}>{result.macd > 0 ? "Positive" : "Negative"}</div>
+              </div>
+              <div style={{ background:"#162032", border:"1px solid #1c2d42", borderRadius:12, padding:"12px 7px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", marginBottom:8 }}>EMA 20</div>
+                <div style={{ fontSize:13, fontWeight:800, fontFamily:"monospace", color: result.price > result.ema20 ? "#00e676" : "#ff3d57", marginBottom:4 }}>{fP(result.ema20)}</div>
+                <div style={{ fontSize:9, color: result.price > result.ema20 ? "#00e676" : "#ff3d57", fontFamily:"monospace" }}>{result.price > result.ema20 ? "वर (Bull)" : "खाली (Bear)"}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Support & Resistance */}
+          <div style={{ background:"#111827", border:"1px solid #1c2d42", borderRadius:18, padding:16, marginBottom:10 }}>
+            <div style={{ fontSize:9, color:"#4a6080", fontFamily:"monospace", textTransform:"uppercase", letterSpacing:2, marginBottom:12 }}>Support & Resistance</div>
+            {[
+              ["RESIST 2", fP(result.lv.r2), "#ff3d57", "rgba(255,61,87,.5)",   90],
+              ["RESIST 1", fP(result.lv.r1), "#ff3d57", "rgba(255,61,87,.3)",   72],
+              ["CURRENT",  fP(result.price),  "#00d4ff", "#00d4ff",              55],
+              ["SUPPORT 1",fP(result.lv.s1), "#00e676", "rgba(0,230,118,.4)",   37],
+              ["SUPPORT 2",fP(result.lv.s2), "#00e676", "rgba(0,230,118,.6)",   18],
+            ].map(([l,v,c,bc,w]) => (
+              <div key={l} style={{ display:"flex", alignItems:"center", gap:9, marginBottom:7 }}>
+                <span style={{ fontSize:9, fontWeight:700, fontFamily:"monospace", padding:"3px 8px", borderRadius:5, minWidth:70, textAlign:"center", background:"rgba(0,0,0,.3)", color:c }}>{l}</span>
+                <span style={{ fontFamily:"monospace", fontSize:13, fontWeight:700, flex:1, color:c }}>{v}</span>
+                <div style={{ flex:2, height:5, background:"#1c2d42", borderRadius:2, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:w+"%", background:bc, borderRadius:2 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Disclaimer */}
+          <div style={{ background:"rgba(255,202,40,.04)", border:"1px solid rgba(255,202,40,.15)", borderRadius:13, padding:"13px 15px", marginBottom:10 }}>
+            <p style={{ fontFamily:"monospace", fontSize:10, color:"#6b8aaa", lineHeight:1.7 }}>
+              <strong style={{ color:"#ffca28" }}>⚠️ सूचना:</strong> हे tool फक्त मार्गदर्शनासाठी आहे. Crypto trading मध्ये नेहमी risk असतो.{" "}
+              <strong style={{ color:"#ffca28" }}>Final decision नेहमी तुमचा.</strong> गरजेपेक्षा जास्त invest करू नका.
+            </p>
+          </div>
+
+          <button onClick={() => { setResult(null); setAiAnalysis(""); window.scrollTo(0,0); }}
+            style={{ width:"100%", background:"transparent", border:"1px solid #1c2d42", borderRadius:11, padding:12, color:"#6b8aaa", fontSize:13, fontWeight:700, cursor:"pointer", marginBottom:24 }}>
+            ↑ पुन्हा विश्लेषण करा
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
